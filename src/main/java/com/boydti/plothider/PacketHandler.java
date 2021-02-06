@@ -147,19 +147,23 @@ public class PacketHandler {
                     if (Permissions.hasPermission(pp, "plots.plothider.bypass")) { // Admin bypass
                         return;
                     }
+
                     String world = pp.getLocation().getWorld();
                     if (!PlotSquared.get().hasPlotArea(world)) { // Not a plot area
                         return;
                     }
+
                     PacketContainer packet = event.getPacket();
                     StructureModifier<Integer> ints = packet.getIntegers();
-                    StructureModifier<byte[]> byteArray = packet.getByteArrays();
-                    StructureModifier<Boolean> booleans = packet.getBooleans();
+                    StructureModifier<byte[]> byteArrays = packet.getByteArrays();
+                    StructureModifier<List<NbtBase<?>>> nbtLists = packet.getListNbtModifier();
+
+                    // Chunk X,Z & Block X,Z
                     int cx = ints.read(0);
                     int cz = ints.read(1);
                     int bx = cx << 4;
                     int bz = cz << 4;
-                    boolean biomes = booleans.read(0);
+
                     Location corner1 = new Location(world, bx, 0, bz);
                     Location corner2 = new Location(world, bx + 15, 0, bz);
                     Location corner3 = new Location(world, bx, 0, bz + 15);
@@ -168,6 +172,7 @@ public class PacketHandler {
                     Plot plot2 = corner2.getOwnedPlot();
                     Plot plot3 = corner3.getOwnedPlot();
                     Plot plot4 = corner4.getOwnedPlot();
+
                     plot1 = (plot1 != null && (plot1.isDenied(pp.getUUID()) || (
                         !plot1.isAdded(pp.getUUID()) && plot1.getFlag(HideFlag.class)))) ?
                         plot1 :
@@ -184,72 +189,66 @@ public class PacketHandler {
                         !plot4.isAdded(pp.getUUID()) && plot4.getFlag(HideFlag.class)))) ?
                         plot4 :
                         null;
+
                     if (plot1 == null && plot2 == null && plot3 == null
                         && plot4 == null) { // No plots to hide
                         return;
                     }
+
                     if (plot1 == plot4 && plot1 != null) { // Not allowed to see the entire chunk
-                        byteArray.write(0, new byte[byteArray.read(0).length]);
-                        StructureModifier<List<NbtBase<?>>> list = packet.getListNbtModifier();
-                        list.write(0, new ArrayList<>());
+                        byteArrays.write(0, new byte[byteArrays.read(0).length]);
+                        nbtLists.write(0, new ArrayList<>());
                         event.setPacket(packet);
                         return;
                     }
+
                     // Not allowed to see part of the chunk
                     Plot denied = plot1 != null ?
                         plot1 :
                         plot2 != null ? plot2 : plot3 != null ? plot3 : plot4;
                     PlotArea area = denied.getArea();
+
                     int AIR = 0;
-                    byte[] sections = byteArray.read(0);
-                    int size = sections.length;
-                    int datasize = sections.length;
-                    List<BlockStorage> array = new ArrayList<>();
-                    int layer = 0;
-                    byte[] biomearray;
-                    ByteArrayInputStream buffer;
+
                     int bitMask = ints.read(2);
-                    if (biomes) {
-                        buffer = new ByteArrayInputStream(Arrays.copyOfRange(sections, 0,
-                            sections.length - 256 * Integer.bitCount(bitMask)));
-                        biomearray = Arrays.copyOfRange(sections,
-                            sections.length - 256 * Integer.bitCount(bitMask), sections.length);
-                        datasize -= 256 * Integer.bitCount(bitMask);
-                    } else {
-                        buffer = new ByteArrayInputStream(sections);
-                        biomearray = null;
-                    }
+
+                    byte[] sections = byteArrays.read(0);
+                    ByteArrayInputStream buffer = new ByteArrayInputStream(sections);
+                    int size = sections.length;
+
+                    List<BlockStorage> array = new ArrayList<>();
 
                     try {
-                        boolean sky =
-                            Bukkit.getWorld(world).getEnvironment() == World.Environment.NORMAL;
-
                         byte[] section;
-                        for (layer = 0; layer < 16; layer++) {
+                        for (int layer = 0; layer < 16; layer++) {
                             if ((bitMask >> layer & 0x1) == 1) {
-                                int start = datasize - buffer.available();
+                                int start = size - buffer.available();
 
-                                int bitsperBlock = readVarInt(buffer);
+                                // skip the block count short
+                                buffer.skip(2);
 
-                                int paletteLength = readVarInt(buffer);
+                                byte bitsperBlock = (byte) buffer.read();
 
-                                for (int i = 0; i < paletteLength; i++) {
-                                    readVarInt(buffer);
+                                if (bitsperBlock <= 8) {
+                                    int paletteLength = readVarInt(buffer);
+
+                                    for (int i = 0; i < paletteLength; i++) {
+                                        readVarInt(buffer);
+                                    }
                                 }
 
                                 int dataArrayLength = readVarInt(buffer);
 
-                                for (int i = 0; i < bitsperBlock * 512; i++) {
-                                    readVarInt(buffer);
+                                for (int i = 0; i < dataArrayLength; i++) {
+                                    // skip all the longs in the data array
+                                    buffer.skip(8);
                                 }
 
-                                buffer.skip(sky ? 4096 : 2048);
-
-                                int end = datasize - buffer.available();
+                                int end = size - buffer.available();
 
                                 section = Arrays.copyOfRange(sections, start, end);
 
-                                BlockStorage storage = new BlockStorage(section, sky);
+                                BlockStorage storage = new BlockStorage(section);
                                 array.add(storage);
                             }
                         }
@@ -276,10 +275,12 @@ public class PacketHandler {
                         for (BlockStorage section1 : array) {
                             section1.write(baos);
                         }
-                        if (biomearray != null) {
-                            baos.write(biomearray);
+                        byteArrays.write(0, baos.toByteArray());
+
+                        List<NbtBase<?>> nbtList = nbtLists.read(0);
+                        for (NbtBase<?> nbt : nbtList) {
+
                         }
-                        byteArray.write(0, baos.toByteArray());
 
                         event.setPacket(packet);
                     } catch (Throwable e) {
